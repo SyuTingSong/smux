@@ -403,6 +403,25 @@ func TestReadStreamAfterSessionClose(t *testing.T) {
 	}
 }
 
+func TestReadStreamAfterCloseWrite(t *testing.T) {
+	_, stop, cli, err := setupServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	session, _ := Client(cli, nil)
+	stream, _ := session.OpenStream()
+	stream.Write([]byte("hello"))
+	buf := make([]byte, 10)
+	stream.Read(buf)
+	stream.CloseWrite()
+	if _, err := stream.Read(buf); err == io.EOF {
+		t.Log(err)
+	} else {
+		t.Fatal("read stream after session close succeeded")
+	}
+}
+
 func TestWriteStreamAfterConnectionClose(t *testing.T) {
 	_, stop, cli, err := setupServer(t)
 	if err != nil {

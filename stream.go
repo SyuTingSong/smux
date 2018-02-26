@@ -24,6 +24,7 @@ type Stream struct {
 	dieLock       sync.Mutex
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
+	dying         int32
 }
 
 // newStream initiates a Stream struct
@@ -34,6 +35,7 @@ func newStream(id uint32, frameSize int, sess *Session) *Stream {
 	s.frameSize = frameSize
 	s.sess = sess
 	s.die = make(chan struct{})
+	s.dying = 0
 	return s
 }
 
@@ -79,6 +81,9 @@ READ:
 	case <-deadline:
 		return n, errTimeout
 	case <-s.die:
+		if atomic.CompareAndSwapInt32(&s.dying, 1, 2) {
+			return 0, io.EOF
+		}
 		return 0, errors.New(errBrokenPipe)
 	}
 }
@@ -144,6 +149,11 @@ func (s *Stream) Close() error {
 		_, err := s.sess.writeFrame(newFrame(cmdFIN, s.id))
 		return err
 	}
+}
+
+func (s *Stream) CloseWrite() error {
+	atomic.CompareAndSwapInt32(&s.dying, 0, 1)
+	return s.Close()
 }
 
 // SetReadDeadline sets the read deadline as defined by
