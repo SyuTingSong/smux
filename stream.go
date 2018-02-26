@@ -7,7 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"github.com/pkg/errors"
 )
 
@@ -21,6 +20,7 @@ type Stream struct {
 	frameSize     int
 	chReadEvent   chan struct{} // notify a read event
 	die           chan struct{} // flag the stream has closed
+	dying         chan byte
 	dieLock       sync.Mutex
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
@@ -34,6 +34,7 @@ func newStream(id uint32, frameSize int, sess *Session) *Stream {
 	s.frameSize = frameSize
 	s.sess = sess
 	s.die = make(chan struct{})
+	s.dying = make(chan byte, 1)
 	return s
 }
 
@@ -48,6 +49,11 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 		select {
 		case <-s.die:
 			return 0, errors.New(errBrokenPipe)
+		case <-s.dying:
+			s.dieLock.Lock()
+			close(s.die)
+			s.dieLock.Unlock()
+			return 0, io.EOF
 		default:
 			return 0, nil
 		}
@@ -80,6 +86,11 @@ READ:
 		return n, errTimeout
 	case <-s.die:
 		return 0, errors.New(errBrokenPipe)
+	case <-s.dying:
+		s.dieLock.Lock()
+		close(s.die)
+		s.dieLock.Unlock()
+		return 0, io.EOF
 	}
 }
 
@@ -94,6 +105,9 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 
 	select {
 	case <-s.die:
+		return 0, errors.New(errBrokenPipe)
+	case d := <-s.dying:
+		s.dying <- d
 		return 0, errors.New(errBrokenPipe)
 	default:
 	}
@@ -110,6 +124,9 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 		case s.sess.writes <- req:
 		case <-s.die:
 			return sent, errors.New(errBrokenPipe)
+		case d := <-s.dying:
+			s.dying <- d
+			return sent, errors.New(errBrokenPipe)
 		case <-deadline:
 			return sent, errTimeout
 		}
@@ -121,6 +138,9 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 				return sent, result.err
 			}
 		case <-s.die:
+			return sent, errors.New(errBrokenPipe)
+		case d := <-s.dying:
+			s.dying <- d
 			return sent, errors.New(errBrokenPipe)
 		case <-deadline:
 			return sent, errTimeout
@@ -139,6 +159,25 @@ func (s *Stream) Close() error {
 		return errors.New(errBrokenPipe)
 	default:
 		close(s.die)
+		s.dieLock.Unlock()
+		s.sess.streamClosed(s.id)
+		_, err := s.sess.writeFrame(newFrame(cmdFIN, s.id))
+		return err
+	}
+}
+
+func (s *Stream) CloseWrite() error {
+	s.dieLock.Lock()
+	select {
+	case <-s.die:
+		s.dieLock.Unlock()
+		return errors.New(errBrokenPipe)
+	case d := <-s.dying:
+		s.dying <- d
+		s.dieLock.Unlock()
+		return errors.New(errBrokenPipe)
+	default:
+		s.dying <- 1
 		s.dieLock.Unlock()
 		s.sess.streamClosed(s.id)
 		_, err := s.sess.writeFrame(newFrame(cmdFIN, s.id))
